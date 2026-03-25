@@ -1,6 +1,6 @@
 """
 Fleet Vision API — Análise de imagens de checklist de frotas.
-Backend: Google Gemini Flash (primário) → LLaVA via Ollama (fallback local)
+Backend configurável: Gemini Flash e/ou LLaVA via Ollama (local)
 """
 
 import base64
@@ -51,6 +51,40 @@ OLLAMA_API_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434") + 
 OLLAMA_MODEL = "llava:7b"
 
 GEMINI_API_KEY: str = ""
+
+CONFIG_FILE = "/data/config.json"
+
+# Configuração padrão de backends
+_DEFAULT_CONFIG = {
+    "primary": "gemini",    # "gemini" | "llava"
+    "secondary": "llava",   # "gemini" | "llava" | "none"
+}
+_ai_config: dict = dict(_DEFAULT_CONFIG)
+
+
+def _load_config():
+    global _ai_config
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            with open(CONFIG_FILE, "r") as f:
+                saved = json.load(f)
+            _ai_config = {**_DEFAULT_CONFIG, **saved}
+            logger.info("Config carregada: primary=%s secondary=%s", _ai_config["primary"], _ai_config["secondary"])
+        else:
+            _ai_config = dict(_DEFAULT_CONFIG)
+    except Exception as e:
+        logger.warning("Erro ao carregar config, usando padrão: %s", e)
+        _ai_config = dict(_DEFAULT_CONFIG)
+
+
+def _save_config():
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(_ai_config, f, indent=2)
+    except Exception as e:
+        logger.error("Erro ao salvar config: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -136,9 +170,10 @@ async def lifespan(app: FastAPI):
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY não configurada — usará apenas fallback LLaVA local.")
+    _load_config()
     await init_db()
     await cleanup_expired()
-    logger.info("Fleet Vision API iniciada. Backend: Gemini Flash → LLaVA (fallback)")
+    logger.info("Fleet Vision API iniciada. Config: primary=%s secondary=%s", _ai_config["primary"], _ai_config["secondary"])
     yield
     await close_db()
     logger.info("Fleet Vision API encerrada.")
@@ -149,8 +184,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Fleet Vision API",
-    description="Análise de imagens de checklist de frotas — Gemini Flash + LLaVA fallback",
-    version="2.0.0",
+    description="Análise de imagens de checklist de frotas — Gemini Flash + LLaVA configuráveis",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -165,7 +200,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files (UI de teste)
+# Static files (UI)
 import os as _os
 _static_dir = _os.path.join(_os.path.dirname(__file__), "static")
 if _os.path.isdir(_static_dir):
@@ -206,11 +241,9 @@ def _strip_json(content: str) -> dict:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        # Tenta extrair o JSON entre { } mesmo que truncado
         start = content.find("{")
         if start == -1:
             raise
-        # Conta chaves para encontrar onde o JSON termina ou tenta fechar
         depth = 0
         end = start
         for i, ch in enumerate(content[start:], start):
@@ -227,7 +260,6 @@ def _strip_json(content: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
-        # Última tentativa: JSON truncado — retorna erro de qualidade
         logger.warning("JSON truncado da IA, retornando erro de qualidade de imagem.")
         return {
             "image_quality": "inadequada",
@@ -242,11 +274,10 @@ def _strip_json(content: str) -> dict:
         }
 
 
-GEMINI_PRICE_INPUT_PER_1M = 0.15   # USD por 1M tokens de entrada (gemini-2.5-flash)
-GEMINI_PRICE_OUTPUT_PER_1M = 0.60  # USD por 1M tokens de saída
+GEMINI_PRICE_INPUT_PER_1M = 0.15
+GEMINI_PRICE_OUTPUT_PER_1M = 0.60
 
 async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, dict]:
-    """Call Gemini Flash with vision. Returns (parsed dict, usage_info) or raises."""
     parts = [{"text": prompt}]
     for b64, mime in images:
         parts.append({"inline_data": {"mime_type": mime, "data": b64}})
@@ -267,7 +298,6 @@ async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: s
     body = resp.json()
     content = body["candidates"][0]["content"]["parts"][0]["text"]
 
-    # Extrai uso de tokens
     usage_meta = body.get("usageMetadata", {})
     input_tokens = usage_meta.get("promptTokenCount", 0)
     output_tokens = usage_meta.get("candidatesTokenCount", 0)
@@ -279,7 +309,7 @@ async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: s
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "estimated_cost_usd": round(cost_usd, 6),
-        "estimated_cost_brl": round(cost_usd * 5.0, 5),  # cotação aproximada
+        "estimated_cost_brl": round(cost_usd * 5.0, 5),
     }
     logger.info("Gemini usage | request_id=%s | tokens=%d | cost_usd=%.6f", request_id, total_tokens, cost_usd)
 
@@ -287,7 +317,6 @@ async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: s
 
 
 async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, dict]:
-    """Call LLaVA via Ollama as fallback. Returns parsed dict or raises."""
     images_b64 = [b64 for b64, _ in images]
 
     payload = {
@@ -301,7 +330,7 @@ async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request
     }
 
     t0 = time.monotonic()
-    async with httpx.AsyncClient(timeout=300) as client:  # LLaVA pode demorar sem GPU
+    async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(OLLAMA_API_URL, json=payload)
 
     elapsed = time.monotonic() - t0
@@ -324,25 +353,92 @@ async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request
     return _strip_json(content), usage_info
 
 
-async def _analyze_with_fallback(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, str, dict]:
-    """Try Gemini first, fall back to LLaVA. Returns (result, backend_used, usage_info)."""
-    if GEMINI_API_KEY:
-        try:
-            result, usage = await _call_gemini(prompt, images, request_id)
-            return result, "gemini-2.5-flash", usage
-        except Exception as e:
-            logger.warning("Gemini falhou, tentando LLaVA | request_id=%s | error=%s", request_id, str(e))
-
-    try:
+async def _call_backend(name: str, prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, str, dict]:
+    """Chama um backend específico pelo nome."""
+    if name == "gemini":
+        if not GEMINI_API_KEY:
+            raise RuntimeError("Gemini não configurado: GEMINI_API_KEY ausente.")
+        result, usage = await _call_gemini(prompt, images, request_id)
+        return result, "gemini-2.5-flash", usage
+    elif name == "llava":
         result, usage = await _call_ollama_llava(prompt, images, request_id)
         return result, "llava-7b-local", usage
+    else:
+        raise RuntimeError(f"Backend desconhecido: {name}")
+
+
+async def _analyze_with_fallback(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, str, dict]:
+    """Executa análise respeitando a ordem primary → secondary configurada."""
+    primary = _ai_config.get("primary", "gemini")
+    secondary = _ai_config.get("secondary", "llava")
+
+    try:
+        return await _call_backend(primary, prompt, images, request_id)
     except Exception as e:
-        logger.error("LLaVA também falhou | request_id=%s | error=%s", request_id, str(e))
-        raise HTTPException(status_code=502, detail="Nenhum backend de IA disponível no momento.")
+        logger.warning("Backend primário '%s' falhou | request_id=%s | error=%s", primary, request_id, str(e))
+
+    if secondary and secondary != "none" and secondary != primary:
+        try:
+            return await _call_backend(secondary, prompt, images, request_id)
+        except Exception as e:
+            logger.error("Backend secundário '%s' também falhou | request_id=%s | error=%s", secondary, request_id, str(e))
+
+    raise HTTPException(status_code=502, detail="Nenhum backend de IA disponível no momento.")
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Config endpoints
+# ---------------------------------------------------------------------------
+@app.get("/config")
+async def get_config():
+    """Retorna a configuração atual de backends."""
+    ollama_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(OLLAMA_API_URL.replace("/api/chat", "/"))
+            ollama_ok = r.status_code == 200
+    except Exception:
+        pass
+
+    return {
+        "primary": _ai_config.get("primary", "gemini"),
+        "secondary": _ai_config.get("secondary", "llava"),
+        "available_backends": {
+            "gemini": bool(GEMINI_API_KEY),
+            "llava": ollama_ok,
+        },
+    }
+
+
+@app.post("/config")
+async def set_config(request: Request):
+    """Salva a configuração de backends."""
+    global _ai_config
+    body = await request.json()
+
+    primary = body.get("primary")
+    secondary = body.get("secondary")
+
+    valid = {"gemini", "llava"}
+    valid_secondary = {"gemini", "llava", "none"}
+
+    if primary not in valid:
+        raise HTTPException(status_code=400, detail=f"primary inválido. Use: {valid}")
+    if secondary not in valid_secondary:
+        raise HTTPException(status_code=400, detail=f"secondary inválido. Use: {valid_secondary}")
+    if primary == secondary:
+        raise HTTPException(status_code=400, detail="primary e secondary não podem ser iguais.")
+
+    _ai_config["primary"] = primary
+    _ai_config["secondary"] = secondary
+    _save_config()
+
+    logger.info("Config atualizada: primary=%s secondary=%s", primary, secondary)
+    return {"ok": True, "primary": primary, "secondary": secondary}
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
@@ -357,8 +453,12 @@ async def health():
     return {
         "status": "ok",
         "service": "fleet-vision-api",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "config": {
+            "primary": _ai_config.get("primary", "gemini"),
+            "secondary": _ai_config.get("secondary", "llava"),
+        },
         "backends": {
             "gemini_flash": bool(GEMINI_API_KEY),
             "llava_local": ollama_ok,
@@ -366,6 +466,9 @@ async def health():
     }
 
 
+# ---------------------------------------------------------------------------
+# Analyze endpoints
+# ---------------------------------------------------------------------------
 @app.post("/analyze")
 @limiter.limit("10/minute")
 async def analyze(
@@ -382,12 +485,10 @@ async def analyze(
     b64, media_type = await _read_and_validate_image(image)
     image_size_bytes = len(b64) * 3 // 4
 
-    # Verifica duplicata (a menos que force=True)
     if not force:
         duplicate = await find_duplicate(b64, item_name)
         if duplicate:
             logger.info("Imagem duplicada encontrada | request_id_original=%s", duplicate["request_id"])
-            # Retorna resultado cacheado
             cached = await get_analysis(duplicate["request_id"])
             return {
                 **{k: v for k, v in (cached or {}).items() if k != "ai_result"},

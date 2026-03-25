@@ -92,6 +92,15 @@
     .pagination span { font-size: 0.85rem; color: #94a3b8; }
     .empty-msg { text-align: center; color: #64748b; padding: 40px 0; font-size: 0.9rem; }
 
+    /* Config */
+    #panel-config .card h2 { margin-bottom: 8px; }
+    .backend-pill { display: flex; align-items: center; gap: 8px; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 16px; flex: 1; min-width: 180px; }
+    .backend-pill .bp-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .backend-pill .bp-dot.online { background: #22c55e; }
+    .backend-pill .bp-dot.offline { background: #ef4444; }
+    .backend-pill .bp-name { font-size: 0.88rem; font-weight: 600; color: #e2e8f0; }
+    .backend-pill .bp-status { font-size: 0.75rem; color: #64748b; margin-top: 1px; }
+
     /* Modal */
     .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center; padding: 16px; }
     .modal-overlay.show { display: flex; }
@@ -117,6 +126,7 @@
     <button class="tab active" onclick="switchTab('analyze')">Análise Individual</button>
     <button class="tab" onclick="switchTab('evolution')">Evolução de Danos</button>
     <button class="tab" onclick="switchTab('history')">Histórico</button>
+    <button class="tab" onclick="switchTab('config')">⚙️ Configurações</button>
   </div>
 
   <!-- ANALYZE -->
@@ -214,7 +224,54 @@
   </div>
 </div>
 
-<!-- Modal -->
+  <!-- CONFIG -->
+  <div class="panel" id="panel-config">
+    <div class="card">
+      <h2>⚙️ Configuração de Backends de IA</h2>
+      <p style="font-size:0.85rem;color:#64748b;margin-bottom:20px;">Escolha qual IA será usada como primária e secundária (fallback). A secundária é acionada automaticamente se a primária falhar.</p>
+
+      <div id="config-backends-status" style="display:flex;gap:12px;margin-bottom:24px;flex-wrap:wrap;"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div>
+          <label style="margin-top:0;">IA Primária</label>
+          <select id="cfg-primary">
+            <option value="gemini">🌐 Gemini Flash (Google)</option>
+            <option value="llava">🖥️ LLaVA (Local / Ollama)</option>
+          </select>
+          <p style="font-size:0.75rem;color:#64748b;margin-top:6px;">Será sempre a primeira tentativa.</p>
+        </div>
+        <div>
+          <label style="margin-top:0;">IA Secundária (fallback)</label>
+          <select id="cfg-secondary">
+            <option value="llava">🖥️ LLaVA (Local / Ollama)</option>
+            <option value="gemini">🌐 Gemini Flash (Google)</option>
+            <option value="none">🚫 Nenhuma (sem fallback)</option>
+          </select>
+          <p style="font-size:0.75rem;color:#64748b;margin-top:6px;">Usada se a primária falhar ou estiver indisponível.</p>
+        </div>
+      </div>
+
+      <div id="config-warning" style="display:none;background:#713f12;color:#fde68a;padding:10px 14px;border-radius:8px;font-size:0.85rem;margin-top:16px;"></div>
+
+      <button class="submit" id="btn-save-config" onclick="saveConfig()" style="margin-top:20px;">💾 Salvar Configuração</button>
+      <div id="config-feedback" style="margin-top:12px;font-size:0.88rem;display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h2>ℹ️ Sobre os Backends</h2>
+      <div style="display:grid;gap:12px;">
+        <div style="background:#0f172a;border-radius:10px;padding:16px;border-left:3px solid #3b82f6;">
+          <strong style="color:#93c5fd;">🌐 Gemini Flash (Google)</strong>
+          <p style="font-size:0.85rem;color:#94a3b8;margin-top:6px;">Modelo de visão em nuvem do Google. Alta precisão, processa imagens complexas. Tem custo por token (~$0,15/M tokens entrada). Requer conexão com a internet e GEMINI_API_KEY configurada.</p>
+        </div>
+        <div style="background:#0f172a;border-radius:10px;padding:16px;border-left:3px solid #22c55e;">
+          <strong style="color:#86efac;">🖥️ LLaVA (Local / Ollama)</strong>
+          <p style="font-size:0.85rem;color:#94a3b8;margin-top:6px;">Modelo de visão rodando 100% localmente via Ollama. Gratuito e privado — as imagens nunca saem do servidor. Pode ser mais lento sem GPU, mas funciona offline.</p>
+        </div>
+      </div>
+    </div>
+  </div>
 <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
   <div class="modal" id="modal-content" onclick="event.stopPropagation()">
     <button class="modal-close" onclick="document.getElementById('modal-overlay').classList.remove('show')">&times;</button>
@@ -263,11 +320,101 @@
   setInterval(checkStatus, 30000);
 
   function switchTab(tab) {
-    const tabs = ['analyze', 'evolution', 'history'];
+    const tabs = ['analyze', 'evolution', 'history', 'config'];
     document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', tabs[i] === tab));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     document.getElementById('panel-' + tab).classList.add('active');
     if (tab === 'history') { loadStats(); loadHistory(1); }
+    if (tab === 'config') { loadConfig(); }
+  }
+
+  // =========== CONFIG ===========
+  async function loadConfig() {
+    try {
+      const r = await fetch(API + '/config');
+      const d = await r.json();
+
+      // Status dos backends
+      const statusEl = document.getElementById('config-backends-status');
+      statusEl.innerHTML = `
+        <div class="backend-pill">
+          <div class="bp-dot ${d.available_backends.gemini ? 'online' : 'offline'}"></div>
+          <div>
+            <div class="bp-name">Gemini Flash</div>
+            <div class="bp-status">${d.available_backends.gemini ? '✓ Disponível' : '✗ API Key não configurada'}</div>
+          </div>
+        </div>
+        <div class="backend-pill">
+          <div class="bp-dot ${d.available_backends.llava ? 'online' : 'offline'}"></div>
+          <div>
+            <div class="bp-name">LLaVA Local</div>
+            <div class="bp-status">${d.available_backends.llava ? '✓ Ollama rodando' : '✗ Ollama offline'}</div>
+          </div>
+        </div>
+      `;
+
+      // Selects
+      document.getElementById('cfg-primary').value = d.primary;
+      document.getElementById('cfg-secondary').value = d.secondary;
+
+      checkConfigWarning();
+    } catch(e) {
+      console.error('Erro ao carregar config:', e);
+    }
+  }
+
+  function checkConfigWarning() {
+    const primary = document.getElementById('cfg-primary').value;
+    const secondary = document.getElementById('cfg-secondary').value;
+    const warnEl = document.getElementById('config-warning');
+
+    if (primary === secondary) {
+      warnEl.style.display = 'block';
+      warnEl.textContent = '⚠️ Primária e secundária não podem ser iguais.';
+      return false;
+    }
+    warnEl.style.display = 'none';
+    return true;
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('cfg-primary').addEventListener('change', checkConfigWarning);
+    document.getElementById('cfg-secondary').addEventListener('change', checkConfigWarning);
+  });
+
+  async function saveConfig() {
+    if (!checkConfigWarning()) return;
+
+    const primary = document.getElementById('cfg-primary').value;
+    const secondary = document.getElementById('cfg-secondary').value;
+    const btn = document.getElementById('btn-save-config');
+    const feedbackEl = document.getElementById('config-feedback');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span>Salvando...';
+
+    try {
+      const r = await fetch(API + '/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ primary, secondary }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Erro ao salvar');
+
+      feedbackEl.style.display = 'block';
+      feedbackEl.style.color = '#86efac';
+      feedbackEl.textContent = `✅ Configuração salva! Primária: ${primary === 'gemini' ? 'Gemini Flash' : 'LLaVA Local'} · Secundária: ${secondary === 'none' ? 'Nenhuma' : secondary === 'gemini' ? 'Gemini Flash' : 'LLaVA Local'}`;
+      setTimeout(() => { feedbackEl.style.display = 'none'; }, 5000);
+      await loadConfig();
+    } catch(e) {
+      feedbackEl.style.display = 'block';
+      feedbackEl.style.color = '#fca5a5';
+      feedbackEl.textContent = `❌ ${e.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '💾 Salvar Configuração';
+    }
   }
 
   function previewSingle(e) {
