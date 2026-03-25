@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fleet Vision API — Teste</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header { background: #1e293b; border-bottom: 1px solid #334155; padding: 16px 32px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 1.25rem; font-weight: 600; }
+    header span { font-size: 0.8rem; background: #22c55e; color: #052e16; padding: 2px 10px; border-radius: 99px; font-weight: 600; }
+    .container { max-width: 900px; margin: 0 auto; padding: 32px 16px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+    .tab { padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 0.9rem; border: 1px solid #334155; background: transparent; color: #94a3b8; transition: all .15s; }
+    .tab.active { background: #3b82f6; border-color: #3b82f6; color: white; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: #93c5fd; }
+    label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px; margin-top: 14px; }
+    input[type=text], textarea, select { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; color: #e2e8f0; font-size: 0.9rem; outline: none; transition: border .15s; }
+    input[type=text]:focus, textarea:focus, select:focus { border-color: #3b82f6; }
+    textarea { resize: vertical; min-height: 80px; }
+    .upload-area { border: 2px dashed #334155; border-radius: 10px; padding: 24px; text-align: center; cursor: pointer; transition: all .15s; margin-top: 6px; }
+    .upload-area:hover, .upload-area.drag { border-color: #3b82f6; background: #1e3a5f22; }
+    .upload-area input { display: none; }
+    .upload-area p { color: #64748b; font-size: 0.85rem; }
+    .preview-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .preview-item { position: relative; }
+    .preview-item img { width: 90px; height: 90px; object-fit: cover; border-radius: 8px; border: 1px solid #334155; }
+    .preview-item .remove { position: absolute; top: -6px; right: -6px; background: #ef4444; border-radius: 50%; width: 18px; height: 18px; font-size: 11px; cursor: pointer; display: flex; align-items: center; justify-content: center; border: none; color: white; }
+    .preview-item .date-input { display: block; width: 90px; margin-top: 4px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 3px 6px; color: #e2e8f0; font-size: 0.7rem; }
+    button.submit { margin-top: 20px; width: 100%; padding: 12px; background: #3b82f6; border: none; border-radius: 8px; color: white; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: background .15s; }
+    button.submit:hover { background: #2563eb; }
+    button.submit:disabled { background: #1e3a5f; color: #475569; cursor: not-allowed; }
+    .result { margin-top: 20px; display: none; }
+    .result.show { display: block; }
+    .result-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    .badge { padding: 4px 12px; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+    .badge.ok { background: #14532d; color: #86efac; }
+    .badge.atenção { background: #713f12; color: #fde68a; }
+    .badge.crítico { background: #7f1d1d; color: #fca5a5; }
+    .badge.match { background: #1e3a5f; color: #93c5fd; }
+    .badge.nomatch { background: #3b1f1f; color: #fca5a5; }
+    .section { margin-top: 16px; }
+    .section h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em; color: #64748b; margin-bottom: 8px; }
+    .analysis-text { font-size: 0.9rem; line-height: 1.6; color: #cbd5e1; }
+    .list-items { list-style: none; }
+    .list-items li { padding: 4px 0; font-size: 0.88rem; color: #94a3b8; }
+    .list-items li::before { content: "→ "; color: #3b82f6; }
+    .spec-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+    .spec-item { background: #0f172a; border-radius: 8px; padding: 8px 12px; }
+    .spec-item .key { font-size: 0.72rem; color: #64748b; }
+    .spec-item .val { font-size: 0.88rem; color: #e2e8f0; margin-top: 2px; }
+    .error-box { background: #7f1d1d22; border: 1px solid #ef4444; border-radius: 8px; padding: 12px 16px; color: #fca5a5; font-size: 0.9rem; margin-top: 16px; }
+    .loader { display: inline-block; width: 18px; height: 18px; border: 2px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .backend-tag { font-size: 0.72rem; color: #64748b; margin-top: 12px; text-align: right; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .evolution-result { margin-top: 16px; }
+    .evo-item { background: #0f172a; border-radius: 8px; padding: 12px; margin-bottom: 8px; border-left: 3px solid #334155; }
+    .evo-item.ok { border-left-color: #22c55e; }
+    .evo-item.atenção { border-left-color: #eab308; }
+    .evo-item.crítico { border-left-color: #ef4444; }
+    .trend { display: inline-flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 600; }
+    .trend.melhorando { color: #22c55e; }
+    .trend.estável { color: #94a3b8; }
+    .trend.deteriorando { color: #ef4444; }
+
+    /* History styles */
+    .stats-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    .stat-box { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 14px 18px; flex: 1; min-width: 140px; }
+    .stat-box .stat-label { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }
+    .stat-box .stat-value { font-size: 1.3rem; font-weight: 700; color: #e2e8f0; margin-top: 4px; }
+    .filters-row { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 16px; flex-wrap: wrap; }
+    .filters-row .filter-group { flex: 1; min-width: 150px; }
+    .filters-row .filter-group label { margin-top: 0; }
+    .filters-row select, .filters-row input[type=text] { width: 100%; }
+    .btn-small { padding: 10px 18px; background: #3b82f6; border: none; border-radius: 8px; color: white; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: background .15s; white-space: nowrap; }
+    .btn-small:hover { background: #2563eb; }
+    .history-list { display: flex; flex-direction: column; gap: 10px; }
+    .history-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; cursor: pointer; transition: border-color .15s; }
+    .history-card:hover { border-color: #3b82f6; }
+    .history-card .hc-info { flex: 1; min-width: 200px; }
+    .history-card .hc-info h4 { font-size: 0.95rem; font-weight: 600; color: #e2e8f0; margin-bottom: 4px; }
+    .history-card .hc-info p { font-size: 0.8rem; color: #64748b; }
+    .history-card .hc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .history-card .hc-meta .cost { font-size: 0.8rem; color: #94a3b8; }
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 20px; }
+    .pagination button { padding: 6px 14px; background: #334155; border: none; border-radius: 6px; color: #e2e8f0; cursor: pointer; font-size: 0.85rem; }
+    .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pagination span { font-size: 0.85rem; color: #94a3b8; }
+    .empty-msg { text-align: center; color: #64748b; padding: 40px 0; font-size: 0.9rem; }
+
+    /* Modal */
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center; padding: 16px; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: #1e293b; border: 1px solid #334155; border-radius: 14px; max-width: 700px; width: 100%; max-height: 90vh; overflow-y: auto; padding: 24px; position: relative; }
+    .modal-close { position: absolute; top: 12px; right: 16px; background: none; border: none; color: #94a3b8; font-size: 1.4rem; cursor: pointer; }
+    .modal-close:hover { color: #e2e8f0; }
+    .modal h3 { font-size: 1.05rem; font-weight: 600; color: #93c5fd; margin-bottom: 16px; }
+    .modal-img { width: 100%; max-height: 300px; object-fit: contain; border-radius: 8px; border: 1px solid #334155; margin-bottom: 16px; background: #0f172a; }
+    .detail-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #334155; font-size: 0.88rem; }
+    .detail-row .dk { color: #64748b; }
+    .detail-row .dv { color: #e2e8f0; }
+  </style>
+</head>
+<body>
+<header>
+  <svg width="24" height="24" fill="none" stroke="#3b82f6" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><circle cx="12" cy="14" r="3"/></svg>
+  <h1>Fleet Vision API</h1>
+  <span id="status-badge">verificando...</span>
+</header>
+
+<div class="container">
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('analyze')">Análise Individual</button>
+    <button class="tab" onclick="switchTab('evolution')">Evolução de Danos</button>
+    <button class="tab" onclick="switchTab('history')">Histórico</button>
+  </div>
+
+  <!-- ANALYZE -->
+  <div class="panel active" id="panel-analyze">
+    <div class="card">
+      <h2>📷 Analisar Item do Checklist</h2>
+
+      <label>Placa / Frota <span style="color:#475569;font-weight:400">(opcional)</span></label>
+      <input type="text" id="vehicle-id" placeholder="Ex: ABC-1234, Frota 42, Caminhão 07...">
+
+      <label>Nome do Item</label>
+      <input type="text" id="item-name" placeholder="Ex: Pneu dianteiro esquerdo, Lataria traseira...">
+
+      <label>Descrição do Inspetor</label>
+      <textarea id="user-desc" placeholder="Ex: Pneu aparenta estar em bom estado, sem danos visíveis..."></textarea>
+
+      <label>Foto do Item</label>
+      <div class="upload-area" id="drop-single" onclick="document.getElementById('file-single').click()">
+        <input type="file" id="file-single" accept="image/jpeg,image/png,image/webp" onchange="previewSingle(event)">
+        <p>Clique ou arraste uma imagem aqui</p>
+        <p style="font-size:0.75rem;margin-top:4px;">JPG, PNG, WEBP — máx. 10MB</p>
+      </div>
+      <div id="preview-single" class="preview-grid"></div>
+
+      <div style="margin-top:16px;display:flex;align-items:center;gap:10px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;color:#94a3b8;font-size:0.85rem;">
+          <input type="checkbox" id="force-analyze" style="width:16px;height:16px;cursor:pointer;">
+          Forçar nova análise (ignorar cache)
+        </label>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:20px;">
+        <button class="submit" id="btn-analyze" onclick="runAnalyze()" style="margin-top:0;flex:1;">🔍 Analisar</button>
+        <button onclick="clearAnalyze()" style="margin-top:0;padding:12px 20px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:0.9rem;cursor:pointer;white-space:nowrap;" title="Limpar formulário">🗑 Limpar</button>
+      </div>
+    </div>
+
+    <div class="result" id="result-analyze"></div>
+  </div>
+
+  <!-- EVOLUTION -->
+  <div class="panel" id="panel-evolution">
+    <div class="card">
+      <h2>📈 Análise de Evolução</h2>
+
+      <label>Nome do Item</label>
+      <input type="text" id="evo-item-name" placeholder="Ex: Pneu traseiro direito, Para-choque dianteiro...">
+
+      <label>Fotos (em ordem cronológica — mínimo 2, máximo 10)</label>
+      <div class="upload-area" id="drop-multi" onclick="document.getElementById('file-multi').click()">
+        <input type="file" id="file-multi" accept="image/jpeg,image/png,image/webp" multiple onchange="previewMulti(event)">
+        <p>Clique ou arraste as imagens aqui</p>
+        <p style="font-size:0.75rem;margin-top:4px;">Selecione múltiplos arquivos em ordem cronológica</p>
+      </div>
+      <div id="preview-multi" class="preview-grid"></div>
+
+      <button class="submit" id="btn-evo" onclick="runEvolution()">📊 Analisar Evolução</button>
+    </div>
+
+    <div class="result" id="result-evo"></div>
+  </div>
+
+  <!-- HISTORY -->
+  <div class="panel" id="panel-history">
+    <div class="stats-bar" id="stats-bar">
+      <div class="stat-box"><div class="stat-label">Total de Análises</div><div class="stat-value" id="stat-total">—</div></div>
+      <div class="stat-box"><div class="stat-label">🟢 OK</div><div class="stat-value" id="stat-ok">—</div></div>
+      <div class="stat-box"><div class="stat-label">🟡 Atenção</div><div class="stat-value" id="stat-atencao">—</div></div>
+      <div class="stat-box"><div class="stat-label">🔴 Crítico</div><div class="stat-value" id="stat-critico">—</div></div>
+      <div class="stat-box"><div class="stat-label">Custo Total</div><div class="stat-value" id="stat-cost">—</div></div>
+    </div>
+
+    <div class="filters-row">
+      <div class="filter-group">
+        <label>🚗 Placa / Frota</label>
+        <input type="text" id="filter-vehicle" placeholder="Ex: ABC-1234, Frota 42...">
+      </div>
+      <div class="filter-group">
+        <label>Filtrar por item</label>
+        <input type="text" id="filter-item" placeholder="Nome do item...">
+      </div>
+      <div class="filter-group">
+        <label>Severidade</label>
+        <select id="filter-severity">
+          <option value="">Todos</option>
+          <option value="ok">OK</option>
+          <option value="atenção">Atenção</option>
+          <option value="crítico">Crítico</option>
+        </select>
+      </div>
+      <button class="btn-small" onclick="loadHistory(1)" style="margin-bottom:1px;">🔄 Atualizar</button>
+    </div>
+
+    <div class="history-list" id="history-list"></div>
+    <div class="pagination" id="history-pagination"></div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-content" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="document.getElementById('modal-overlay').classList.remove('show')">&times;</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+  // Detecta o base path automaticamente (funciona tanto em /vision/ quanto em acesso direto na porta)
+  const _base = window.location.pathname.includes('/vision') ? window.location.origin + '/vision' : window.location.origin;
+  const API = _base.replace(/\/$/, '');
+  let singleFile = null;
+
+  function clearAnalyze() {
+    singleFile = null;
+    document.getElementById('vehicle-id').value = '';
+    document.getElementById('item-name').value = '';
+    document.getElementById('user-desc').value = '';
+    document.getElementById('preview-single').innerHTML = '';
+    document.getElementById('file-single').value = '';
+    document.getElementById('force-analyze').checked = false;
+    const resultEl = document.getElementById('result-analyze');
+    resultEl.className = 'result';
+    resultEl.innerHTML = '';
+  }
+  let multiFiles = [];
+  let historyPage = 1;
+
+  // Status check
+  async function checkStatus() {
+    try {
+      const r = await fetch(API + '/health');
+      const d = await r.json();
+      const el = document.getElementById('status-badge');
+      el.textContent = d.status === 'ok' ? 'online' : 'erro';
+      el.style.background = d.status === 'ok' ? '#22c55e' : '#ef4444';
+      el.style.color = d.status === 'ok' ? '#052e16' : '#fff';
+    } catch(e) {
+      const el = document.getElementById('status-badge');
+      el.textContent = 'offline';
+      el.style.background = '#ef4444';
+      el.style.color = '#fff';
+    }
+  }
+  checkStatus();
+  setInterval(checkStatus, 30000);
+
+  function switchTab(tab) {
+    const tabs = ['analyze', 'evolution', 'history'];
+    document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', tabs[i] === tab));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    if (tab === 'history') { loadStats(); loadHistory(1); }
+  }
+
+  function previewSingle(e) {
+    singleFile = e.target.files[0];
+    const el = document.getElementById('preview-single');
+    el.innerHTML = '';
+    if (!singleFile) return;
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(singleFile);
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-item';
+    const rm = document.createElement('button');
+    rm.className = 'remove';
+    rm.innerHTML = '✕';
+    rm.onclick = () => { singleFile = null; el.innerHTML = ''; };
+    wrap.append(img, rm);
+    el.appendChild(wrap);
+  }
+
+  function previewMulti(e) {
+    multiFiles = Array.from(e.target.files);
+    renderMultiPreview();
+  }
+
+  function renderMultiPreview() {
+    const el = document.getElementById('preview-multi');
+    el.innerHTML = '';
+    multiFiles.forEach((f, i) => {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(f);
+      const dateInput = document.createElement('input');
+      dateInput.type = 'text';
+      dateInput.className = 'date-input';
+      dateInput.placeholder = 'Data (opcional)';
+      dateInput.dataset.index = i;
+      const rm = document.createElement('button');
+      rm.className = 'remove';
+      rm.innerHTML = '✕';
+      rm.onclick = () => { multiFiles.splice(i, 1); renderMultiPreview(); };
+      const wrap = document.createElement('div');
+      wrap.className = 'preview-item';
+      wrap.append(img, rm, dateInput);
+      el.appendChild(wrap);
+    });
+  }
+
+  function severityBadge(s) {
+    return `<span class="badge ${s}">${(s || '').toUpperCase()}</span>`;
+  }
+
+  async function runAnalyze() {
+    const vehicleId = document.getElementById('vehicle-id').value.trim();
+    const name = document.getElementById('item-name').value.trim();
+    const desc = document.getElementById('user-desc').value.trim();
+    if (!name || !desc || !singleFile) { alert('Preencha o nome do item, a descrição e selecione uma imagem.'); return; }
+
+    const btn = document.getElementById('btn-analyze');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span>Analisando...';
+
+    const fd = new FormData();
+    if (vehicleId) fd.append('vehicle_id', vehicleId);
+    fd.append('item_name', name);
+    fd.append('user_description', desc);
+    fd.append('image', singleFile);
+    fd.append('force', document.getElementById('force-analyze').checked ? 'true' : 'false');
+
+    const resultEl = document.getElementById('result-analyze');
+    resultEl.className = 'result';
+    resultEl.innerHTML = '';
+
+    try {
+      const r = await fetch(API + '/analyze', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Erro desconhecido');
+      resultEl.innerHTML = renderAnalyzeResult(d) + `<button onclick="clearAnalyze()" style="margin-top:12px;width:100%;padding:10px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:0.88rem;cursor:pointer;">🗑 Nova análise / Limpar</button>`;
+      resultEl.className = 'result show';
+    } catch(e) {
+      resultEl.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+      resultEl.className = 'result show';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '🔍 Analisar';
+    }
+  }
+
+  function renderAnalyzeResult(d) {
+    const vehicleLabel = document.getElementById('vehicle-id').value.trim();
+    const matchBadge = d.description_matches
+      ? '<span class="badge match">✓ Descrição Confere</span>'
+      : '<span class="badge nomatch">✗ Descrição Diverge</span>';
+    const findings = (d.additional_findings || []).map(f => `<li>${f}</li>`).join('');
+    const recs = (d.recommendations || []).map(r => `<li>${r}</li>`).join('');
+    const specs = Object.entries(d.specific_data || {}).map(([k,v]) =>
+      `<div class="spec-item"><div class="key">${k}</div><div class="val">${v}</div></div>`
+    ).join('');
+
+    return `
+      <div class="card">
+        ${d.image_quality === 'inadequada' ? `<div style="background:#7f1d1d;border:1px solid #ef4444;border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;gap:10px;align-items:flex-start;"><span style="font-size:1.4rem;line-height:1;">📷</span><div><strong style="color:#fca5a5;font-size:0.95rem;">Imagem inadequada para análise</strong><p style="color:#fca5a5;font-size:0.85rem;margin-top:4px;opacity:0.85;">${d.image_quality_reason || 'A foto não tem qualidade suficiente para uma análise confiável.'}</p><p style="color:#fde68a;font-size:0.82rem;margin-top:6px;">⚠️ Refaça a foto com melhor iluminação e foco antes de prosseguir.</p></div></div>` : ''}
+        ${(() => {
+          const plate = (d.specific_data || {}).plate || (d.specific_data || {}).placa;
+          const v = vehicleLabel || plate;
+          return v ? `<div style="font-size:0.8rem;color:#64748b;margin-bottom:10px;">🚗 ${v}${plate && vehicleLabel && plate !== vehicleLabel ? ` (placa identificada: ${plate})` : ''} &mdash; ${d.item}</div>` : '';
+        })()}
+        <div class="result-header">
+          ${severityBadge(d.severity)}
+          ${matchBadge}
+          <span class="badge" style="background:#1e293b;color:#94a3b8">Confiança: ${d.confidence}</span>
+        </div>
+        <div class="section">
+          <h3>Análise da IA</h3>
+          <p class="analysis-text">${d.ai_analysis}</p>
+        </div>
+        ${findings ? `<div class="section"><h3>Achados Adicionais</h3><ul class="list-items">${findings}</ul></div>` : ''}
+        ${specs ? `<div class="section"><h3>Dados Específicos</h3><div class="spec-grid">${specs}</div></div>` : ''}
+        ${recs ? `<div class="section"><h3>Recomendações</h3><ul class="list-items">${recs}</ul></div>` : ''}
+        ${d.cached ? `<div style="background:#713f12;color:#fde68a;padding:8px 12px;border-radius:8px;font-size:0.82rem;margin-top:12px;">♻️ Resultado do cache — esta imagem já foi analisada em ${d.created_at ? new Date(d.created_at).toLocaleString('pt-BR') : ''}. Marque "Forçar nova análise" para reprocessar.</div>` : ''}
+        <div class="backend-tag">
+          Backend: ${d.backend_used || '-'}
+          ${d.usage ? ` · ${d.usage.total_tokens} tokens · ~$${d.usage.estimated_cost_usd} USD` : ''}
+          ${d.processing_seconds ? ` · ${d.processing_seconds}s` : ''}
+          ${d.image_size_bytes ? ` · ${(d.image_size_bytes/1024).toFixed(1)} KB` : ''}
+          · ID: ${d.request_id}
+        </div>
+      </div>`;
+  }
+
+  async function runEvolution() {
+    const name = document.getElementById('evo-item-name').value.trim();
+    if (!name) { alert('Informe o nome do item.'); return; }
+    if (multiFiles.length < 2) { alert('Selecione pelo menos 2 imagens.'); return; }
+
+    const btn = document.getElementById('btn-evo');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span>Analisando evolução...';
+
+    const fd = new FormData();
+    fd.append('item_name', name);
+    multiFiles.forEach(f => fd.append('images', f));
+    document.querySelectorAll('.date-input').forEach(inp => {
+      if (inp.value.trim()) fd.append('dates', inp.value.trim());
+    });
+
+    const resultEl = document.getElementById('result-evo');
+    resultEl.className = 'result';
+    resultEl.innerHTML = '';
+
+    try {
+      const r = await fetch(API + '/analyze/evolution', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || 'Erro desconhecido');
+      resultEl.innerHTML = renderEvoResult(d);
+      resultEl.className = 'result show';
+    } catch(e) {
+      resultEl.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+      resultEl.className = 'result show';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '📊 Analisar Evolução';
+    }
+  }
+
+  function renderEvoResult(d) {
+    const trendClass = (d.trend || '').toLowerCase();
+    const trendIcon = { melhorando: '↗', estável: '→', deteriorando: '↘' }[trendClass] || '?';
+    const perImage = (d.per_image_analysis || []).map(img => `
+      <div class="evo-item ${img.severity}">
+        <strong style="font-size:.85rem">${img.date || 'Imagem ' + img.image_index}</strong>
+        <span class="badge ${img.severity}" style="margin-left:8px;font-size:.72rem">${img.severity}</span>
+        <p style="margin-top:6px;font-size:.88rem;color:#94a3b8">${img.condition}</p>
+      </div>`).join('');
+    const recs = (d.recommendations || []).map(r => `<li>${r}</li>`).join('');
+
+    return `
+      <div class="card">
+        <div class="section">
+          <h3>Tendência</h3>
+          <div class="trend ${trendClass}">${trendIcon} ${d.trend || '-'}</div>
+          ${d.degradation_rate ? `<p style="color:#64748b;font-size:.85rem;margin-top:4px">Velocidade de degradação: ${d.degradation_rate}</p>` : ''}
+          ${d.estimated_action_needed ? `<p style="color:#fde68a;font-size:.85rem;margin-top:4px">⏱ ${d.estimated_action_needed}</p>` : ''}
+        </div>
+        <div class="section">
+          <h3>Resumo da Evolução</h3>
+          <p class="analysis-text">${d.evolution_summary}</p>
+        </div>
+        <div class="section evolution-result">
+          <h3>Por Imagem</h3>
+          ${perImage}
+        </div>
+        ${recs ? `<div class="section"><h3>Recomendações</h3><ul class="list-items">${recs}</ul></div>` : ''}
+        ${d.usage ? `<div class="backend-tag">Backend: ${d.backend_used} · ${d.usage.total_tokens} tokens · ~$${d.usage.estimated_cost_usd} USD (R$\u00a0${d.usage.estimated_cost_brl}) · ID: ${d.request_id}</div>` : `<div class="backend-tag">Backend: ${d.backend_used} · ID: ${d.request_id}</div>`}
+      </div>`;
+  }
+
+  // =========== HISTORY ===========
+  async function loadStats() {
+    try {
+      const r = await fetch(API + '/stats');
+      const d = await r.json();
+      document.getElementById('stat-total').textContent = d.total_analyses;
+      document.getElementById('stat-ok').textContent = d.by_severity.ok || 0;
+      document.getElementById('stat-atencao').textContent = d.by_severity['atenção'] || 0;
+      document.getElementById('stat-critico').textContent = d.by_severity['crítico'] || 0;
+      document.getElementById('stat-cost').textContent = `$${d.total_cost_usd.toFixed(4)} / R$${d.total_cost_brl.toFixed(2)}`;
+    } catch(e) {
+      console.error('Erro ao carregar stats:', e);
+    }
+  }
+
+  async function loadHistory(page) {
+    historyPage = page || 1;
+    const severity = document.getElementById('filter-severity').value;
+    const itemName = document.getElementById('filter-item').value.trim();
+    const vehicleFilter = document.getElementById('filter-vehicle').value.trim();
+    const perPage = 20;
+
+    let url = `${API}/history?page=${historyPage}&per_page=${perPage}`;
+    if (severity) url += `&severity=${encodeURIComponent(severity)}`;
+    if (itemName) url += `&item_name=${encodeURIComponent(itemName)}`;
+    if (vehicleFilter) url += `&vehicle_id=${encodeURIComponent(vehicleFilter)}`;
+
+    const listEl = document.getElementById('history-list');
+    const pagEl = document.getElementById('history-pagination');
+
+    try {
+      const r = await fetch(url);
+      const d = await r.json();
+
+      if (!d.items || d.items.length === 0) {
+        listEl.innerHTML = '<div class="empty-msg">Nenhuma análise encontrada.</div>';
+        pagEl.innerHTML = '';
+        return;
+      }
+
+      listEl.innerHTML = d.items.map(item => {
+        const date = new Date(item.created_at).toLocaleString('pt-BR');
+        const matchIcon = item.description_matches ? '✓' : '✗';
+        return `
+          <div class="history-card" onclick="openDetail('${item.request_id}')">
+            <div class="hc-info">
+              <h4>${escHtml(item.item_name)}${item.vehicle_id ? ` <span style="font-size:0.78rem;color:#64748b;font-weight:400">· 🚗 ${escHtml(item.vehicle_id)}</span>` : ''}</h4>
+              <p>${date} · ${matchIcon} Descrição ${item.description_matches ? 'confere' : 'diverge'}</p>
+            </div>
+            <div class="hc-meta">
+              ${severityBadge(item.severity)}
+              <span class="cost">$${(item.cost_usd || 0).toFixed(4)}</span>
+              <span style="font-size:0.72rem;color:#475569">${item.backend_used}</span>
+            </div>
+          </div>`;
+      }).join('');
+
+      const totalPages = Math.ceil(d.total / perPage);
+      pagEl.innerHTML = `
+        <button ${historyPage <= 1 ? 'disabled' : ''} onclick="loadHistory(${historyPage - 1})">← Anterior</button>
+        <span>Página ${d.page} de ${totalPages} (${d.total} itens)</span>
+        <button ${historyPage >= totalPages ? 'disabled' : ''} onclick="loadHistory(${historyPage + 1})">Próxima →</button>
+      `;
+    } catch(e) {
+      listEl.innerHTML = `<div class="error-box">❌ Erro ao carregar histórico: ${e.message}</div>`;
+      pagEl.innerHTML = '';
+    }
+  }
+
+  async function openDetail(requestId) {
+    const modal = document.getElementById('modal-overlay');
+    const body = document.getElementById('modal-body');
+    body.innerHTML = '<div style="text-align:center;padding:30px;"><span class="loader"></span> Carregando...</div>';
+    modal.classList.add('show');
+
+    try {
+      const r = await fetch(`${API}/history/${requestId}`);
+      if (!r.ok) throw new Error('Análise não encontrada');
+      const d = await r.json();
+
+      const ai = d.ai_result || {};
+      const findings = (ai.additional_findings || []).map(f => `<li>${f}</li>`).join('');
+      const recs = (ai.recommendations || []).map(r => `<li>${r}</li>`).join('');
+      const specs = Object.entries(ai.specific_data || {}).map(([k,v]) =>
+        `<div class="spec-item"><div class="key">${k}</div><div class="val">${v}</div></div>`
+      ).join('');
+
+      body.innerHTML = `
+        <h3>${escHtml(d.item_name)}</h3>
+        <img class="modal-img" src="${API}/history/${requestId}/image" alt="Imagem da análise" onerror="this.style.display='none'">
+        <div class="result-header" style="margin-bottom:12px;">
+          ${severityBadge(d.severity)}
+          <span class="badge ${d.description_matches ? 'match' : 'nomatch'}">${d.description_matches ? '✓ Confere' : '✗ Diverge'}</span>
+        </div>
+        <div class="detail-row"><span class="dk">ID</span><span class="dv">${d.request_id}</span></div>
+        <div class="detail-row"><span class="dk">Data</span><span class="dv">${new Date(d.created_at).toLocaleString('pt-BR')}</span></div>
+        <div class="detail-row"><span class="dk">Expira em</span><span class="dv">${new Date(d.expires_at).toLocaleString('pt-BR')}</span></div>
+        <div class="detail-row"><span class="dk">Backend</span><span class="dv">${d.backend_used}</span></div>
+        <div class="detail-row"><span class="dk">Tokens</span><span class="dv">${d.input_tokens} in / ${d.output_tokens} out</span></div>
+        <div class="detail-row"><span class="dk">Custo</span><span class="dv">$${(d.cost_usd || 0).toFixed(6)} USD / R$${((d.cost_usd || 0) * 5).toFixed(4)}</span></div>
+
+        <div class="section">
+          <h3>Descrição do Inspetor</h3>
+          <p class="analysis-text">${escHtml(d.user_description || '')}</p>
+        </div>
+
+        ${ai.ai_analysis ? `<div class="section"><h3>Análise da IA</h3><p class="analysis-text">${escHtml(ai.ai_analysis)}</p></div>` : ''}
+        ${findings ? `<div class="section"><h3>Achados Adicionais</h3><ul class="list-items">${findings}</ul></div>` : ''}
+        ${specs ? `<div class="section"><h3>Dados Específicos</h3><div class="spec-grid">${specs}</div></div>` : ''}
+        ${recs ? `<div class="section"><h3>Recomendações</h3><ul class="list-items">${recs}</ul></div>` : ''}
+      `;
+    } catch(e) {
+      body.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
+    }
+  }
+
+  function closeModal(e) {
+    if (e.target === document.getElementById('modal-overlay')) {
+      document.getElementById('modal-overlay').classList.remove('show');
+    }
+  }
+
+  function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // Drag and drop
+  ['drop-single','drop-multi'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drag'); });
+    el.addEventListener('dragleave', () => el.classList.remove('drag'));
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      el.classList.remove('drag');
+      if (id === 'drop-single') {
+        const file = e.dataTransfer.files[0];
+        if (file) { singleFile = file; previewSingle({target:{files:[file]}}); }
+      } else {
+        multiFiles = Array.from(e.dataTransfer.files);
+        renderMultiPreview();
+      }
+    });
+  });
+
+  // Filter on Enter
+  document.getElementById('filter-vehicle').addEventListener('keydown', e => { if (e.key === 'Enter') loadHistory(1); });
+  document.getElementById('filter-item').addEventListener('keydown', e => { if (e.key === 'Enter') loadHistory(1); });
+  document.getElementById('filter-severity').addEventListener('change', () => loadHistory(1));
+</script>
+</body>
+</html>

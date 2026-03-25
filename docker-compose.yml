@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  fleet-vision-api:
+    build: .
+    container_name: fleet-vision-api
+    ports:
+      - "127.0.0.1:8100:8100"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8100/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
