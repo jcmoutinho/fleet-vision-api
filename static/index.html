@@ -474,6 +474,15 @@
     const btn = document.getElementById('btn-analyze');
     btn.disabled = true;
     btn.innerHTML = '<span class="loader"></span>Analisando...';
+    let elapsed = 0;
+    const timerInterval = setInterval(() => {
+      elapsed++;
+      if (elapsed < 30) {
+        btn.innerHTML = `<span class="loader"></span>Analisando... ${elapsed}s`;
+      } else {
+        btn.innerHTML = `<span class="loader"></span>Processando com IA local... ${elapsed}s (pode demorar alguns minutos na CPU)`;
+      }
+    }, 1000);
 
     const fd = new FormData();
     if (vehicleId) fd.append('vehicle_id', vehicleId);
@@ -496,6 +505,7 @@
       resultEl.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
       resultEl.className = 'result show';
     } finally {
+      clearInterval(timerInterval);
       btn.disabled = false;
       btn.innerHTML = '🔍 Analisar';
     }
