@@ -473,16 +473,7 @@
 
     const btn = document.getElementById('btn-analyze');
     btn.disabled = true;
-    btn.innerHTML = '<span class="loader"></span>Analisando...';
-    let elapsed = 0;
-    const timerInterval = setInterval(() => {
-      elapsed++;
-      if (elapsed < 30) {
-        btn.innerHTML = `<span class="loader"></span>Analisando... ${elapsed}s`;
-      } else {
-        btn.innerHTML = `<span class="loader"></span>Processando com IA local... ${elapsed}s (pode demorar alguns minutos na CPU)`;
-      }
-    }, 1000);
+    btn.innerHTML = '<span class="loader"></span>Enviando imagem...';
 
     const fd = new FormData();
     if (vehicleId) fd.append('vehicle_id', vehicleId);
@@ -499,13 +490,58 @@
       const r = await fetch(API + '/analyze', { method: 'POST', body: fd });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || 'Erro desconhecido');
-      resultEl.innerHTML = renderAnalyzeResult(d) + `<button onclick="clearAnalyze()" style="margin-top:12px;width:100%;padding:10px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:0.88rem;cursor:pointer;">🗑 Nova análise / Limpar</button>`;
+
+      // Cache hit — já tem resultado
+      if (d.cached && d.status === 'done') {
+        resultEl.innerHTML = renderAnalyzeResult(d.result) + `<button onclick="clearAnalyze()" style="margin-top:12px;width:100%;padding:10px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:0.88rem;cursor:pointer;">🗑 Nova análise / Limpar</button>`;
+        resultEl.className = 'result show';
+        return;
+      }
+
+      // Background job — faz polling
+      const jobId = d.job_id;
+      btn.innerHTML = '<span class="loader"></span>Processando...';
+      resultEl.innerHTML = `<div class="card" id="job-progress"><p style="color:#94a3b8;font-size:0.9rem;"><span class="loader"></span> Analisando imagem em background... <span id="job-elapsed">0s</span></p><p style="color:#64748b;font-size:0.8rem;margin-top:8px;">ID do job: ${jobId}</p></div>`;
       resultEl.className = 'result show';
+
+      const startTime = Date.now();
+      const elapsedInterval = setInterval(() => {
+        const el = document.getElementById('job-elapsed');
+        if (el) el.textContent = Math.round((Date.now() - startTime) / 1000) + 's';
+      }, 1000);
+
+      // Polling com backoff progressivo
+      let pollDelay = 2000;
+      while (true) {
+        await new Promise(res => setTimeout(res, pollDelay));
+        pollDelay = Math.min(pollDelay + 1000, 8000); // incrementa até 8s
+
+        const pr = await fetch(API + '/jobs/' + jobId);
+        const pd = await pr.json();
+
+        if (pd.status === 'done') {
+          clearInterval(elapsedInterval);
+          resultEl.innerHTML = renderAnalyzeResult(pd.result) + `<button onclick="clearAnalyze()" style="margin-top:12px;width:100%;padding:10px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:0.88rem;cursor:pointer;">🗑 Nova análise / Limpar</button>`;
+          break;
+        } else if (pd.status === 'error') {
+          clearInterval(elapsedInterval);
+          resultEl.innerHTML = `<div class="error-box">❌ ${pd.error || 'Erro desconhecido no processamento.'}</div>`;
+          break;
+        }
+        // Ainda pending/processing — atualiza mensagem
+        const progressEl = document.getElementById('job-progress');
+        if (progressEl) {
+          const elapsed = pd.elapsed_seconds || 0;
+          const msg = elapsed > 30
+            ? `Processando com IA local (CPU)... ${elapsed}s — aguarde, pode levar alguns minutos.`
+            : `Analisando imagem em background... ${elapsed}s`;
+          progressEl.innerHTML = `<p style="color:#94a3b8;font-size:0.9rem;"><span class="loader"></span> ${msg}</p><p style="color:#64748b;font-size:0.8rem;margin-top:8px;">ID do job: ${jobId}</p>`;
+        }
+      }
     } catch(e) {
       resultEl.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
       resultEl.className = 'result show';
     } finally {
-      clearInterval(timerInterval);
       btn.disabled = false;
       btn.innerHTML = '🔍 Analisar';
     }
@@ -560,7 +596,7 @@
 
     const btn = document.getElementById('btn-evo');
     btn.disabled = true;
-    btn.innerHTML = '<span class="loader"></span>Analisando evolução...';
+    btn.innerHTML = '<span class="loader"></span>Enviando imagens...';
 
     const fd = new FormData();
     fd.append('item_name', name);
@@ -577,8 +613,44 @@
       const r = await fetch(API + '/analyze/evolution', { method: 'POST', body: fd });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || 'Erro desconhecido');
-      resultEl.innerHTML = renderEvoResult(d);
+
+      const jobId = d.job_id;
+      btn.innerHTML = '<span class="loader"></span>Processando...';
+      resultEl.innerHTML = `<div class="card" id="job-progress-evo"><p style="color:#94a3b8;font-size:0.9rem;"><span class="loader"></span> Analisando evolução em background... <span id="job-evo-elapsed">0s</span></p><p style="color:#64748b;font-size:0.8rem;margin-top:8px;">ID do job: ${jobId}</p></div>`;
       resultEl.className = 'result show';
+
+      const startTime = Date.now();
+      const elapsedInterval = setInterval(() => {
+        const el = document.getElementById('job-evo-elapsed');
+        if (el) el.textContent = Math.round((Date.now() - startTime) / 1000) + 's';
+      }, 1000);
+
+      let pollDelay = 2000;
+      while (true) {
+        await new Promise(res => setTimeout(res, pollDelay));
+        pollDelay = Math.min(pollDelay + 1000, 8000);
+
+        const pr = await fetch(API + '/jobs/' + jobId);
+        const pd = await pr.json();
+
+        if (pd.status === 'done') {
+          clearInterval(elapsedInterval);
+          resultEl.innerHTML = renderEvoResult(pd.result);
+          break;
+        } else if (pd.status === 'error') {
+          clearInterval(elapsedInterval);
+          resultEl.innerHTML = `<div class="error-box">❌ ${pd.error || 'Erro desconhecido no processamento.'}</div>`;
+          break;
+        }
+        const progressEl = document.getElementById('job-progress-evo');
+        if (progressEl) {
+          const elapsed = pd.elapsed_seconds || 0;
+          const msg = elapsed > 30
+            ? `Processando com IA local (CPU)... ${elapsed}s — aguarde.`
+            : `Analisando evolução em background... ${elapsed}s`;
+          progressEl.innerHTML = `<p style="color:#94a3b8;font-size:0.9rem;"><span class="loader"></span> ${msg}</p><p style="color:#64748b;font-size:0.8rem;margin-top:8px;">ID do job: ${jobId}</p>`;
+        }
+      }
     } catch(e) {
       resultEl.innerHTML = `<div class="error-box">❌ ${e.message}</div>`;
       resultEl.className = 'result show';

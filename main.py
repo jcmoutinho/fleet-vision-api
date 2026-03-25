@@ -1,8 +1,10 @@
 """
 Fleet Vision API — Análise de imagens de checklist de frotas.
 Backend configurável: Gemini Flash e/ou LLaVA via Ollama (local)
+Processamento assíncrono em background com polling por job_id.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -54,12 +56,37 @@ GEMINI_API_KEY: str = ""
 
 CONFIG_FILE = "/data/config.json"
 
-# Configuração padrão de backends
 _DEFAULT_CONFIG = {
-    "primary": "gemini",    # "gemini" | "llava"
-    "secondary": "llava",   # "gemini" | "llava" | "none"
+    "primary": "gemini",
+    "secondary": "llava",
 }
 _ai_config: dict = dict(_DEFAULT_CONFIG)
+
+# ---------------------------------------------------------------------------
+# In-memory job store
+# ---------------------------------------------------------------------------
+# job = { "status": "pending"|"processing"|"done"|"error",
+#         "created_at": float, "result": dict|None, "error": str|None }
+_jobs: dict[str, dict] = {}
+JOB_TTL = 3600  # segundos — limpa jobs antigos
+
+
+def _new_job() -> str:
+    job_id = str(uuid.uuid4())[:12]
+    _jobs[job_id] = {
+        "status": "pending",
+        "created_at": time.time(),
+        "result": None,
+        "error": None,
+    }
+    return job_id
+
+
+def _cleanup_jobs():
+    cutoff = time.time() - JOB_TTL
+    stale = [jid for jid, j in _jobs.items() if j["created_at"] < cutoff]
+    for jid in stale:
+        del _jobs[jid]
 
 
 def _load_config():
@@ -107,7 +134,7 @@ Regras:
    ```json
    {
      "image_quality": "inadequada",
-     "image_quality_reason": "descreva o problema: desfocada / escura / resolução baixa / cortada / etc.",
+     "image_quality_reason": "descreva o problema",
      "ai_analysis": "Imagem inadequada para análise. [motivo]",
      "description_matches": null,
      "confidence": "baixa",
@@ -119,18 +146,18 @@ Regras:
    ```
 4. Se a imagem for adequada, prossiga com a análise normal e inclua `"image_quality": "adequada"` no JSON.
 5. Compare sua análise com a descrição do inspetor e determine se a descrição confere com o que está na imagem.
-6. Classifique a severidade: "ok" (sem problemas), "atenção" (requer monitoramento ou manutenção preventiva), "crítico" (risco à segurança, requer ação imediata).
+6. Classifique a severidade: "ok" (sem problemas), "atenção" (requer monitoramento), "crítico" (risco à segurança).
 7. Forneça recomendações práticas.
 
-Responda EXCLUSIVAMENTE em JSON válido, sem markdown, sem blocos de código, com esta estrutura:
+Responda EXCLUSIVAMENTE em JSON válido, sem markdown, sem blocos de código:
 {
-  "ai_analysis": "descrição detalhada do que você viu",
-  "description_matches": true ou false,
-  "confidence": "alta", "média" ou "baixa",
-  "additional_findings": ["detalhe 1", "detalhe 2"],
-  "severity": "ok", "atenção" ou "crítico",
-  "specific_data": { campos relevantes ao tipo de item },
-  "recommendations": ["recomendação 1", "recomendação 2"]
+  "ai_analysis": "...",
+  "description_matches": true|false,
+  "confidence": "alta"|"média"|"baixa",
+  "additional_findings": [],
+  "severity": "ok"|"atenção"|"crítico",
+  "specific_data": {},
+  "recommendations": []
 }
 
 Linguagem: português do Brasil, técnica mas acessível."""
@@ -139,18 +166,16 @@ SYSTEM_PROMPT_EVOLUTION = """Você é um especialista em inspeção técnica de 
 
 Sua tarefa: analisar uma sequência cronológica de imagens do MESMO item e identificar a evolução do estado ao longo do tempo.
 
-Se a placa do veículo estiver visível em qualquer imagem, inclua-a no campo `specific_data.plate` da análise.
-
-Responda EXCLUSIVAMENTE em JSON válido, sem markdown, sem blocos de código, com esta estrutura:
+Responda EXCLUSIVAMENTE em JSON válido, sem markdown, sem blocos de código:
 {
   "per_image_analysis": [
-    { "image_index": 1, "date": "data ou null", "condition": "descrição", "severity": "ok/atenção/crítico" }
+    { "image_index": 1, "date": "data ou null", "condition": "...", "severity": "ok|atenção|crítico" }
   ],
-  "evolution_summary": "resumo da evolução",
-  "trend": "melhorando/estável/deteriorando",
-  "degradation_rate": "lenta/moderada/rápida ou null",
-  "estimated_action_needed": "estimativa de quando ação será necessária",
-  "recommendations": ["recomendação 1"]
+  "evolution_summary": "...",
+  "trend": "melhorando|estável|deteriorando",
+  "degradation_rate": "lenta|moderada|rápida|null",
+  "estimated_action_needed": "...",
+  "recommendations": []
 }
 
 Linguagem: português do Brasil, técnica mas acessível."""
@@ -169,7 +194,7 @@ async def lifespan(app: FastAPI):
     global GEMINI_API_KEY
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY não configurada — usará apenas fallback LLaVA local.")
+        logger.warning("GEMINI_API_KEY não configurada — usará apenas LLaVA local.")
     _load_config()
     await init_db()
     await cleanup_expired()
@@ -184,8 +209,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Fleet Vision API",
-    description="Análise de imagens de checklist de frotas — Gemini Flash + LLaVA configuráveis",
-    version="2.1.0",
+    description="Análise de imagens de checklist de frotas — processamento em background",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -200,7 +225,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files (UI)
 import os as _os
 _static_dir = _os.path.join(_os.path.dirname(__file__), "static")
 if _os.path.isdir(_static_dir):
@@ -220,10 +244,7 @@ async def root():
 async def _read_and_validate_image(image: UploadFile) -> tuple[str, str]:
     content_type = image.content_type or ""
     if content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tipo de imagem não suportado: {content_type}. Use jpg, png ou webp.",
-        )
+        raise HTTPException(status_code=400, detail=f"Tipo não suportado: {content_type}. Use jpg, png ou webp.")
     data = await image.read()
     if len(data) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=400, detail="Imagem excede o limite de 10MB.")
@@ -231,13 +252,11 @@ async def _read_and_validate_image(image: UploadFile) -> tuple[str, str]:
 
 
 def _strip_json(content: str) -> dict:
-    """Strip markdown fences and parse JSON. Handles truncated responses."""
     content = content.strip()
     if content.startswith("```"):
         lines = content.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         content = "\n".join(lines).strip()
-
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -259,18 +278,17 @@ def _strip_json(content: str) -> dict:
                 return json.loads(content[start:end])
             except json.JSONDecodeError:
                 pass
-
-        logger.warning("JSON truncado da IA, retornando erro de qualidade de imagem.")
+        logger.warning("JSON truncado da IA.")
         return {
             "image_quality": "inadequada",
-            "image_quality_reason": "A IA não conseguiu processar a imagem completamente. Tente novamente ou use uma imagem com melhor qualidade.",
-            "ai_analysis": "Erro ao processar resposta da IA. Tente novamente.",
+            "image_quality_reason": "A IA não conseguiu processar a imagem. Tente novamente.",
+            "ai_analysis": "Erro ao processar resposta da IA.",
             "description_matches": None,
             "confidence": "baixa",
             "additional_findings": [],
             "severity": "atenção",
             "specific_data": {},
-            "recommendations": ["Tente novamente. Se o erro persistir, refaça a foto com melhor qualidade."],
+            "recommendations": ["Tente novamente. Se persistir, refaça a foto."],
         }
 
 
@@ -281,29 +299,22 @@ async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: s
     parts = [{"text": prompt}]
     for b64, mime in images:
         parts.append({"inline_data": {"mime_type": mime, "data": b64}})
-
     payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096}}
     url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
-
     t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(url, json=payload)
-
     elapsed = time.monotonic() - t0
     logger.info("Gemini response | request_id=%s | status=%s | time=%.2fs", request_id, resp.status_code, elapsed)
-
     if resp.status_code != 200:
         raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
-
     body = resp.json()
     content = body["candidates"][0]["content"]["parts"][0]["text"]
-
     usage_meta = body.get("usageMetadata", {})
     input_tokens = usage_meta.get("promptTokenCount", 0)
     output_tokens = usage_meta.get("candidatesTokenCount", 0)
     total_tokens = usage_meta.get("totalTokenCount", input_tokens + output_tokens)
     cost_usd = (input_tokens / 1_000_000 * GEMINI_PRICE_INPUT_PER_1M) + (output_tokens / 1_000_000 * GEMINI_PRICE_OUTPUT_PER_1M)
-
     usage_info = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -311,14 +322,11 @@ async def _call_gemini(prompt: str, images: list[tuple[str, str]], request_id: s
         "estimated_cost_usd": round(cost_usd, 6),
         "estimated_cost_brl": round(cost_usd * 5.0, 5),
     }
-    logger.info("Gemini usage | request_id=%s | tokens=%d | cost_usd=%.6f", request_id, total_tokens, cost_usd)
-
     return _strip_json(content), usage_info
 
 
 async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, dict]:
     images_b64 = [b64 for b64, _ in images]
-
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -328,17 +336,13 @@ async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request
         "stream": False,
         "options": {"temperature": 0.2},
     }
-
     t0 = time.monotonic()
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(OLLAMA_API_URL, json=payload)
-
     elapsed = time.monotonic() - t0
     logger.info("LLaVA response | request_id=%s | status=%s | time=%.2fs", request_id, resp.status_code, elapsed)
-
     if resp.status_code != 200:
         raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:300]}")
-
     body = resp.json()
     content = body["message"]["content"]
     eval_count = body.get("eval_count", 0)
@@ -354,7 +358,6 @@ async def _call_ollama_llava(prompt: str, images: list[tuple[str, str]], request
 
 
 async def _call_backend(name: str, prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, str, dict]:
-    """Chama um backend específico pelo nome."""
     if name == "gemini":
         if not GEMINI_API_KEY:
             raise RuntimeError("Gemini não configurado: GEMINI_API_KEY ausente.")
@@ -368,22 +371,110 @@ async def _call_backend(name: str, prompt: str, images: list[tuple[str, str]], r
 
 
 async def _analyze_with_fallback(prompt: str, images: list[tuple[str, str]], request_id: str) -> tuple[dict, str, dict]:
-    """Executa análise respeitando a ordem primary → secondary configurada."""
     primary = _ai_config.get("primary", "gemini")
     secondary = _ai_config.get("secondary", "llava")
-
     try:
         return await _call_backend(primary, prompt, images, request_id)
     except Exception as e:
         logger.warning("Backend primário '%s' falhou | request_id=%s | error=%s", primary, request_id, str(e))
-
     if secondary and secondary != "none" and secondary != primary:
         try:
             return await _call_backend(secondary, prompt, images, request_id)
         except Exception as e:
-            logger.error("Backend secundário '%s' também falhou | request_id=%s | error=%s", secondary, request_id, str(e))
+            logger.error("Backend secundário '%s' falhou | request_id=%s | error=%s", secondary, request_id, str(e))
+    raise RuntimeError("Nenhum backend de IA disponível no momento.")
 
-    raise HTTPException(status_code=502, detail="Nenhum backend de IA disponível no momento.")
+
+# ---------------------------------------------------------------------------
+# Background worker
+# ---------------------------------------------------------------------------
+async def _run_analyze_job(job_id: str, request_id: str, item_name: str, user_description: str,
+                           b64: str, media_type: str, vehicle_id: Optional[str]):
+    _jobs[job_id]["status"] = "processing"
+    t0 = time.monotonic()
+    try:
+        vehicle_prefix = f"Veículo/Frota: {vehicle_id}\n" if vehicle_id else ""
+        prompt = (
+            f"{SYSTEM_PROMPT_ANALYZE}\n\n"
+            f"{vehicle_prefix}"
+            f"Item do checklist: {item_name}\n"
+            f"Descrição do inspetor: {user_description}\n\n"
+            "Analise a imagem e responda em JSON conforme instruído."
+        )
+        ai_result, backend, usage = await _analyze_with_fallback(prompt, [(b64, media_type)], request_id)
+        processing_seconds = round(time.monotonic() - t0, 2)
+        image_size_bytes = len(b64) * 3 // 4
+
+        await save_analysis(request_id, item_name, user_description, b64, media_type,
+                            ai_result, backend, usage, processing_seconds, vehicle_id)
+
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = {
+            "request_id": request_id,
+            "item": item_name,
+            "user_description": user_description,
+            "description_matches": ai_result.get("description_matches"),
+            "confidence": ai_result.get("confidence", "baixa"),
+            "ai_analysis": ai_result.get("ai_analysis", ""),
+            "additional_findings": ai_result.get("additional_findings", []),
+            "severity": ai_result.get("severity", "atenção"),
+            "specific_data": ai_result.get("specific_data", {}),
+            "recommendations": ai_result.get("recommendations", []),
+            "backend_used": backend,
+            "usage": usage,
+            "processing_seconds": processing_seconds,
+            "image_size_bytes": image_size_bytes,
+            "image_quality": ai_result.get("image_quality", "adequada"),
+            "image_quality_reason": ai_result.get("image_quality_reason", ""),
+            "vehicle_id": vehicle_id or "",
+            "cached": False,
+        }
+        logger.info("Job concluído | job_id=%s | request_id=%s | %.2fs", job_id, request_id, processing_seconds)
+    except Exception as e:
+        _jobs[job_id]["status"] = "error"
+        _jobs[job_id]["error"] = str(e)
+        logger.error("Job falhou | job_id=%s | error=%s", job_id, str(e))
+
+
+async def _run_evolution_job(job_id: str, request_id: str, item_name: str,
+                              imgs: list[tuple[str, str]], date_labels: list[str]):
+    _jobs[job_id]["status"] = "processing"
+    t0 = time.monotonic()
+    try:
+        dates_str = "\n".join([f"- {label}" for label in date_labels])
+        prompt = (
+            f"{SYSTEM_PROMPT_EVOLUTION}\n\n"
+            f"Item do checklist: {item_name}\n"
+            f"Sequência temporal ({len(imgs)} imagens):\n{dates_str}\n\n"
+            "Analise a evolução e responda em JSON conforme instruído."
+        )
+        ai_result, backend, usage = await _analyze_with_fallback(prompt, imgs, request_id)
+        processing_seconds = round(time.monotonic() - t0, 2)
+
+        first_b64, first_mime = imgs[0]
+        await save_analysis(request_id, item_name, f"[Evolução] {len(imgs)} imagens",
+                            first_b64, first_mime, ai_result, backend, usage, processing_seconds)
+
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = {
+            "request_id": request_id,
+            "item": item_name,
+            "total_images": len(imgs),
+            "per_image_analysis": ai_result.get("per_image_analysis", []),
+            "evolution_summary": ai_result.get("evolution_summary", ""),
+            "trend": ai_result.get("trend", ""),
+            "degradation_rate": ai_result.get("degradation_rate"),
+            "estimated_action_needed": ai_result.get("estimated_action_needed", ""),
+            "recommendations": ai_result.get("recommendations", []),
+            "backend_used": backend,
+            "usage": usage,
+            "processing_seconds": processing_seconds,
+        }
+        logger.info("Job evolução concluído | job_id=%s | %.2fs", job_id, processing_seconds)
+    except Exception as e:
+        _jobs[job_id]["status"] = "error"
+        _jobs[job_id]["error"] = str(e)
+        logger.error("Job evolução falhou | job_id=%s | error=%s", job_id, str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +482,6 @@ async def _analyze_with_fallback(prompt: str, images: list[tuple[str, str]], req
 # ---------------------------------------------------------------------------
 @app.get("/config")
 async def get_config():
-    """Retorna a configuração atual de backends."""
     ollama_ok = False
     try:
         async with httpx.AsyncClient(timeout=3) as client:
@@ -399,7 +489,6 @@ async def get_config():
             ollama_ok = r.status_code == 200
     except Exception:
         pass
-
     return {
         "primary": _ai_config.get("primary", "gemini"),
         "secondary": _ai_config.get("secondary", "llava"),
@@ -412,33 +501,27 @@ async def get_config():
 
 @app.post("/config")
 async def set_config(request: Request):
-    """Salva a configuração de backends."""
     global _ai_config
     body = await request.json()
-
     primary = body.get("primary")
     secondary = body.get("secondary")
-
     valid = {"gemini", "llava"}
     valid_secondary = {"gemini", "llava", "none"}
-
     if primary not in valid:
         raise HTTPException(status_code=400, detail=f"primary inválido. Use: {valid}")
     if secondary not in valid_secondary:
         raise HTTPException(status_code=400, detail=f"secondary inválido. Use: {valid_secondary}")
     if primary == secondary:
         raise HTTPException(status_code=400, detail="primary e secondary não podem ser iguais.")
-
     _ai_config["primary"] = primary
     _ai_config["secondary"] = secondary
     _save_config()
-
     logger.info("Config atualizada: primary=%s secondary=%s", primary, secondary)
     return {"ok": True, "primary": primary, "secondary": secondary}
 
 
 # ---------------------------------------------------------------------------
-# Health endpoint
+# Health
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
@@ -449,11 +532,10 @@ async def health():
             ollama_ok = r.status_code == 200
     except Exception:
         pass
-
     return {
         "status": "ok",
         "service": "fleet-vision-api",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "config": {
             "primary": _ai_config.get("primary", "gemini"),
@@ -467,7 +549,30 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
-# Analyze endpoints
+# Job status endpoint
+# ---------------------------------------------------------------------------
+@app.get("/jobs/{job_id}")
+async def job_status(job_id: str):
+    """Retorna o status de um job de análise em background."""
+    _cleanup_jobs()
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job não encontrado ou expirado.")
+    response = {
+        "job_id": job_id,
+        "status": job["status"],  # pending | processing | done | error
+        "created_at": job["created_at"],
+        "elapsed_seconds": round(time.time() - job["created_at"], 1),
+    }
+    if job["status"] == "done":
+        response["result"] = job["result"]
+    elif job["status"] == "error":
+        response["error"] = job["error"]
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Analyze endpoints (agora retornam job_id imediatamente)
 # ---------------------------------------------------------------------------
 @app.post("/analyze")
 @limiter.limit("10/minute")
@@ -483,64 +588,38 @@ async def analyze(
     logger.info("POST /analyze | request_id=%s | item=%s | force=%s", request_id, item_name, force)
 
     b64, media_type = await _read_and_validate_image(image)
-    image_size_bytes = len(b64) * 3 // 4
 
+    # Verifica cache (resposta imediata se já processado)
     if not force:
         duplicate = await find_duplicate(b64, item_name)
         if duplicate:
-            logger.info("Imagem duplicada encontrada | request_id_original=%s", duplicate["request_id"])
+            logger.info("Cache hit | request_id_original=%s", duplicate["request_id"])
             cached = await get_analysis(duplicate["request_id"])
             return {
-                **{k: v for k, v in (cached or {}).items() if k != "ai_result"},
-                **(cached.get("ai_result", {}) if cached else {}),
-                "item": item_name,
-                "user_description": user_description,
+                "job_id": None,
                 "cached": True,
-                "original_request_id": duplicate["request_id"],
-                "cache_note": "Esta imagem já foi analisada. Use force=true para forçar nova análise.",
-                "request_id": request_id,
+                "status": "done",
+                "result": {
+                    **{k: v for k, v in (cached or {}).items() if k != "ai_result"},
+                    **(cached.get("ai_result", {}) if cached else {}),
+                    "item": item_name,
+                    "user_description": user_description,
+                    "original_request_id": duplicate["request_id"],
+                    "cache_note": "Esta imagem já foi analisada. Use force=true para forçar nova análise.",
+                    "request_id": request_id,
+                },
             }
 
-    t0 = time.monotonic()
-    vehicle_prefix = f"Veículo/Frota: {vehicle_id}\n" if vehicle_id else ""
-    prompt = (
-        f"{SYSTEM_PROMPT_ANALYZE}\n\n"
-        f"{vehicle_prefix}"
-        f"Item do checklist: {item_name}\n"
-        f"Descrição do inspetor: {user_description}\n\n"
-        "Analise a imagem e responda em JSON conforme instruído."
-    )
-
-    ai_result, backend, usage = await _analyze_with_fallback(prompt, [(b64, media_type)], request_id)
-    processing_seconds = round(time.monotonic() - t0, 2)
-
-    try:
-        await save_analysis(
-            request_id, item_name, user_description, b64, media_type,
-            ai_result, backend, usage, processing_seconds, vehicle_id,
-        )
-    except Exception as e:
-        logger.error("Falha ao salvar análise no banco | request_id=%s | error=%s", request_id, str(e))
+    # Dispara job em background
+    job_id = _new_job()
+    asyncio.create_task(_run_analyze_job(job_id, request_id, item_name, user_description, b64, media_type, vehicle_id))
 
     return {
-        "item": item_name,
-        "user_description": user_description,
-        "description_matches": ai_result.get("description_matches"),
-        "confidence": ai_result.get("confidence", "baixa"),
-        "ai_analysis": ai_result.get("ai_analysis", ""),
-        "additional_findings": ai_result.get("additional_findings", []),
-        "severity": ai_result.get("severity", "atenção"),
-        "specific_data": ai_result.get("specific_data", {}),
-        "recommendations": ai_result.get("recommendations", []),
-        "backend_used": backend,
-        "usage": usage,
-        "processing_seconds": processing_seconds,
-        "image_size_bytes": image_size_bytes,
-        "image_quality": ai_result.get("image_quality", "adequada"),
-        "image_quality_reason": ai_result.get("image_quality_reason", ""),
-        "vehicle_id": vehicle_id or "",
+        "job_id": job_id,
+        "status": "pending",
         "cached": False,
         "request_id": request_id,
+        "message": "Análise iniciada. Consulte GET /jobs/{job_id} para acompanhar.",
     }
 
 
@@ -556,9 +635,9 @@ async def analyze_evolution(
     logger.info("POST /analyze/evolution | request_id=%s | item=%s | images=%d", request_id, item_name, len(images))
 
     if len(images) < 2:
-        raise HTTPException(status_code=400, detail="Envie pelo menos 2 imagens para análise de evolução.")
+        raise HTTPException(status_code=400, detail="Envie pelo menos 2 imagens.")
     if len(images) > 10:
-        raise HTTPException(status_code=400, detail="Máximo de 10 imagens por requisição.")
+        raise HTTPException(status_code=400, detail="Máximo de 10 imagens.")
 
     date_list = list(dates or [])
     while len(date_list) < len(images):
@@ -571,45 +650,19 @@ async def analyze_evolution(
         imgs.append((b64, media_type))
         date_labels.append(date_list[idx] or f"Imagem {idx + 1}")
 
-    dates_str = "\n".join([f"- {label}" for label in date_labels])
-    prompt = (
-        f"{SYSTEM_PROMPT_EVOLUTION}\n\n"
-        f"Item do checklist: {item_name}\n"
-        f"Sequência temporal ({len(images)} imagens):\n{dates_str}\n\n"
-        "Analise a evolução e responda em JSON conforme instruído."
-    )
-
-    t0 = time.monotonic()
-    ai_result, backend, usage = await _analyze_with_fallback(prompt, imgs, request_id)
-    processing_seconds = round(time.monotonic() - t0, 2)
-
-    try:
-        first_b64, first_mime = imgs[0]
-        await save_analysis(
-            request_id, item_name, f"[Evolução] {len(images)} imagens",
-            first_b64, first_mime, ai_result, backend, usage, processing_seconds,
-        )
-    except Exception as e:
-        logger.error("Falha ao salvar evolução no banco | request_id=%s | error=%s", request_id, str(e))
+    job_id = _new_job()
+    asyncio.create_task(_run_evolution_job(job_id, request_id, item_name, imgs, date_labels))
 
     return {
-        "item": item_name,
-        "total_images": len(images),
-        "per_image_analysis": ai_result.get("per_image_analysis", []),
-        "evolution_summary": ai_result.get("evolution_summary", ""),
-        "trend": ai_result.get("trend", ""),
-        "degradation_rate": ai_result.get("degradation_rate"),
-        "estimated_action_needed": ai_result.get("estimated_action_needed", ""),
-        "recommendations": ai_result.get("recommendations", []),
-        "backend_used": backend,
-        "usage": usage,
-        "processing_seconds": processing_seconds,
+        "job_id": job_id,
+        "status": "pending",
         "request_id": request_id,
+        "message": "Análise de evolução iniciada. Consulte GET /jobs/{job_id} para acompanhar.",
     }
 
 
 # ---------------------------------------------------------------------------
-# History & Stats endpoints
+# History & Stats
 # ---------------------------------------------------------------------------
 @app.get("/history")
 async def history(
@@ -619,8 +672,7 @@ async def history(
     item_name: Optional[str] = Query(None),
     vehicle_id: Optional[str] = Query(None),
 ):
-    result = await list_analyses(page=page, per_page=per_page, severity=severity, item_name=item_name, vehicle_id=vehicle_id)
-    return result
+    return await list_analyses(page=page, per_page=per_page, severity=severity, item_name=item_name, vehicle_id=vehicle_id)
 
 
 @app.get("/history/{request_id}")
@@ -637,8 +689,7 @@ async def history_image(request_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Imagem não encontrada.")
     image_b64, image_mime = result
-    image_bytes = base64.b64decode(image_b64)
-    return Response(content=image_bytes, media_type=image_mime)
+    return Response(content=base64.b64decode(image_b64), media_type=image_mime)
 
 
 @app.get("/stats")
